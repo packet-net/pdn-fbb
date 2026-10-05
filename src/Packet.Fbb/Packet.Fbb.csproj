@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Packet.Fbb</RootNamespace>
+    <IsPackable>true</IsPackable>
+    <PackageId>Packet.Fbb</PackageId>
+    <Description>FBB BBS forwarding (B1F and B2F compressed, both the calling and the answering side) as a sans-IO session state machine: proposals, FS lines, block framing, LZHUF, the SID, R: lines, B2 objects and the header text codec. Shared by pdn-bbs and pdn-mailcast.</Description>
+    <PackageTags>packet-radio;amateur-radio;bbs;fbb;b1f;b2f;lzhuf;linbpq</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>
