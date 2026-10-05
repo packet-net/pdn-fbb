@@ -1,0 +1,43 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # The repo's own branches and tags run on packet-net's self-hosted x64 runners; pull requests
+    # from forks stay on GitHub's machines, so outside code never runs on ours.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64"]') || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        if: runner.environment == 'github-hosted'
+        with:
+          dotnet-version: 10.0.x
+      # Self-hosted runners use their own .NET 10 (setup-dotnet cannot write to the system
+      # install there); DOTNET_ROOT lets the test apphosts find it, as in pdn-soundmodem.
+      - name: Use the runner's .NET
+        if: runner.environment != 'github-hosted'
+        run: |
+          dotnet --list-sdks | grep -q '^10\.' || { echo "::error::this self-hosted runner has no .NET 10 SDK"; dotnet --list-sdks; exit 1; }
+          echo "DOTNET_ROOT=$(dirname "$(readlink -f "$(which dotnet)")")" >> "$GITHUB_ENV"
+      - name: Build (Release)
+        run: dotnet build -c Release
+      - name: Test
+        run: dotnet test -c Release --no-build --logger "console;verbosity=normal"
+      - name: Pack (check only)
+        # The package must stand alone: no package dependencies.
+        run: |
+          set -euo pipefail
+          dotnet pack src/Packet.Fbb/Packet.Fbb.csproj -c Release --no-build -o "$RUNNER_TEMP/pack-check" -p:Version=0.0.0-ci
+          unzip -p "$RUNNER_TEMP/pack-check/Packet.Fbb.0.0.0-ci.nupkg" Packet.Fbb.nuspec > "$RUNNER_TEMP/pack-check/nuspec.xml"
+          if grep -q '<dependency ' "$RUNNER_TEMP/pack-check/nuspec.xml"; then
+            echo "::error::Packet.Fbb has package dependencies; it is meant to stand alone"
+            cat "$RUNNER_TEMP/pack-check/nuspec.xml"
+            exit 1
+          fi

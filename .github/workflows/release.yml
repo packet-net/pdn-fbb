@@ -1,0 +1,129 @@
+name: release
+
+# Test, pack Packet.Fbb at the tag's version, attach the .nupkg to a GitHub Release, and hand it
+# to nuget.yml for nuget.org.
+#
+# - A `v*` tag builds and publishes.
+# - workflow_dispatch builds and packs at the given version and keeps the .nupkg as a workflow
+#   artifact, releasing nothing: a dry run. Set `publish: true` to also cut the GitHub Release.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build, without the leading v (e.g. 0.2.0 or 0.2.0-rc1)'
+        required: true
+      publish:
+        description: 'Also cut the GitHub Release and push to nuget.org'
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: write # to dispatch nuget.yml
+    steps:
+      - name: Resolve version
+        id: version
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+        run: |
+          case "$EVENT" in
+            push) version="${GITHUB_REF#refs/tags/v}" ;;
+            workflow_dispatch) version="${INPUT_VERSION#v}" ;;
+          esac
+          case "$version" in
+            [0-9]*) ;;
+            *) echo "::error::version '$version' must start with a digit"; exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          case "$version" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+          if [ "$EVENT" = "push" ] || [ "$INPUT_PUBLISH" = "true" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+
+      # Self-hosted runners use their own .NET 10 (setup-dotnet cannot write to the system
+      # install there); DOTNET_ROOT lets the test apphosts find it, as in pdn-soundmodem.
+      - name: Use the runner's .NET
+        run: |
+          dotnet --list-sdks | grep -q '^10\.' || { echo "::error::this self-hosted runner has no .NET 10 SDK"; dotnet --list-sdks; exit 1; }
+          echo "DOTNET_ROOT=$(dirname "$(readlink -f "$(which dotnet)")")" >> "$GITHUB_ENV"
+
+      - name: Build (Release)
+        run: dotnet build -c Release -p:Version=${{ steps.version.outputs.version }}
+
+      - name: Test
+        timeout-minutes: 10
+        run: dotnet test -c Release --no-build
+
+      - name: Pack Packet.Fbb
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          rm -rf artifacts
+          dotnet pack src/Packet.Fbb/Packet.Fbb.csproj -c Release -o artifacts -p:Version="$VERSION"
+          test -f "artifacts/Packet.Fbb.$VERSION.nupkg"
+          ( cd artifacts && sha256sum ./*.nupkg | sed 's# \./# #' > SHA256SUMS && cat SHA256SUMS )
+
+      - uses: actions/upload-artifact@v4
+        if: steps.version.outputs.publish != 'true'
+        with:
+          name: packet-fbb-nupkg
+          path: artifacts/*.nupkg
+          if-no-files-found: error
+
+      - name: GitHub Release
+        if: steps.version.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          prerelease=""
+          if [ "$PRERELEASE" = "true" ]; then prerelease="--prerelease"; fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists: replacing its assets"
+            gh release upload "$TAG" artifacts/*.nupkg artifacts/SHA256SUMS --clobber
+          else
+            gh release create "$TAG" artifacts/*.nupkg artifacts/SHA256SUMS \
+              --target "$GITHUB_SHA" \
+              --title "Packet.Fbb $VERSION" \
+              --generate-notes \
+              $prerelease
+          fi
+
+      # The NuGet push lives in nuget.yml, which nuget.org's trusted publishing policy names, and
+      # pushes the .nupkg attached to this release. Dispatching it (GITHUB_TOKEN may trigger a
+      # workflow_dispatch) keeps the OIDC login out of this job.
+      - name: Push Packet.Fbb to nuget.org
+        if: steps.version.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: gh workflow run nuget.yml --repo "$GITHUB_REPOSITORY" --ref main -f tag="$TAG"
